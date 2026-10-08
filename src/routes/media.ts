@@ -15,8 +15,13 @@ const upload = multer({
  * Helper to build public media URL with CORS proxy support
  */
 function buildPublicUrl(req: Request, key: string): string {
+  if (r2PublicDomain && r2PublicDomain.trim().length > 0) {
+    const domain = r2PublicDomain.replace(/\/+$/, '');
+    return `${domain}/${key}`;
+  }
   const host = req.get('host') || 'localhost:5000';
-  const protocol = req.protocol || 'http';
+  const isLocal = host.includes('localhost') || host.includes('127.0.0.1');
+  const protocol = isLocal ? (req.protocol || 'http') : 'https';
   return `${protocol}://${host}/api/media/file/${key}`;
 }
 
