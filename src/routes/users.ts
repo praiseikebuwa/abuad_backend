@@ -848,6 +848,27 @@ router.all('/profile', authenticateToken, async (req: AuthenticatedRequest, res:
   }
 });
 
+const AI_USER_PROFILE = {
+  id: 'abuad_ai',
+  fullName: 'ABUAD AI Companion',
+  username: 'abuad_ai',
+  email: 'ai@abuad.edu.ng',
+  bio: 'Official ABUAD AI Assistant powered by Llama 3.1. Ask me anything about campus, courses, or events!',
+  avatarUrl: 'https://pub-0014553a7b194df8b2d31efb7c6f4921.r2.dev/abuad_ai_avatar.png',
+  bannerUrl: null,
+  department: 'AI & Data Science',
+  college: 'Sciences & Computing',
+  phoneNumber: null,
+  role: 'ADMIN',
+  isVerified: true,
+  verificationType: 'GOLD',
+  followersCount: 1500,
+  followingCount: 1,
+  status: 'online',
+  streakCount: 99,
+  createdAt: new Date().toISOString(),
+};
+
 /**
  * GET /api/users/profile/:id - Profile by ID alias
  */

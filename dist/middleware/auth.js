@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.authenticateToken = authenticateToken;
+exports.optionalAuth = optionalAuth;
 exports.requireRole = requireRole;
 const jwt_1 = require("../utils/jwt");
 const db_1 = require("../config/db");
@@ -38,6 +39,36 @@ async function authenticateToken(req, res, next) {
     catch (error) {
         return res.status(401).json({ error: 'Unauthorized: Access token expired or invalid' });
     }
+}
+/**
+ * Middleware to optionally authenticate requests (populates req.user if valid token present, doesn't block if absent)
+ */
+async function optionalAuth(req, res, next) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return next();
+    }
+    const token = authHeader.split('Bearer ')[1];
+    try {
+        const payload = (0, jwt_1.verifyAccessToken)(token);
+        const dbUser = await db_1.prisma.user.findUnique({
+            where: { id: payload.userId },
+            select: { id: true, email: true, role: true, isVerified: true, verificationType: true, isBlocked: true },
+        });
+        if (dbUser && !dbUser.isBlocked) {
+            req.user = {
+                id: dbUser.id,
+                email: dbUser.email,
+                role: dbUser.role,
+                isVerified: dbUser.isVerified,
+                verificationType: dbUser.verificationType,
+            };
+        }
+    }
+    catch (_) {
+        // Ignore invalid token in optional auth
+    }
+    next();
 }
 /**
  * Middleware to restrict route access by User Role (e.g., ADMIN, STAFF, STUDENT)

@@ -57,6 +57,7 @@ app.use('/api/channels', chat_1.default);
 app.use('/api/sos_alerts', utilities_1.default);
 app.use('/api/notifications', utilities_1.default);
 app.use('/api/presence', utilities_1.default);
+const aiBotService_1 = require("./services/aiBotService");
 // Global Error Handler
 app.use((err, req, res, next) => {
     console.error('Unhandled Server Error:', err);
@@ -64,4 +65,5 @@ app.use((err, req, res, next) => {
 });
 app.listen(PORT, () => {
     console.log(`🚀 ABUAD Backend Server running on http://localhost:${PORT}`);
+    (0, aiBotService_1.scheduleAiAutonomousPosting)();
 });

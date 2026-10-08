@@ -1,11 +1,15 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.AI_BANNER_URL = exports.AI_AVATAR_URL = void 0;
 exports.isUserVerified = isUserVerified;
 exports.containsAiMention = containsAiMention;
 exports.getOrCreateAiUser = getOrCreateAiUser;
 exports.isContentInappropriate = isContentInappropriate;
 exports.triggerAiPostReply = triggerAiPostReply;
 exports.triggerAiCommentReply = triggerAiCommentReply;
+exports.triggerAiDirectChatReply = triggerAiDirectChatReply;
+exports.generateAndPublishAiPost = generateAndPublishAiPost;
+exports.scheduleAiAutonomousPosting = scheduleAiAutonomousPosting;
 const db_1 = require("../config/db");
 const cloudflare_1 = require("../config/cloudflare");
 const genai_1 = require("@google/genai");
@@ -32,6 +36,8 @@ function containsAiMention(text) {
         return false;
     return /(@ai|#ai)\b/i.test(text);
 }
+exports.AI_AVATAR_URL = 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=400&q=80';
+exports.AI_BANNER_URL = 'https://images.unsplash.com/photo-1550745165-9bc0b252726f?auto=format&fit=crop&w=1200&q=80';
 /**
  * Retrieve or create the system ABUAD AI Bot User
  */
@@ -54,8 +60,20 @@ async function getOrCreateAiUser() {
                 role: 'STAFF',
                 isVerified: true,
                 verificationType: 'GOLD',
-                avatarUrl: 'https://api.dicebear.com/7.x/bottts/svg?seed=abuad_ai',
-                bio: 'Official AI Campus & Academic Assistant for Afe Babalola University (ABUAD). Tag @ai in your posts or comments for instant assistance!'
+                avatarUrl: exports.AI_AVATAR_URL,
+                bannerUrl: exports.AI_BANNER_URL,
+                bio: 'Official AI Campus & Academic Assistant for Afe Babalola University (ABUAD). Send me a DM or tag @ai for instant answers and conversations!'
+            }
+        });
+    }
+    else if (!aiUser.avatarUrl || aiUser.avatarUrl.includes('dicebear') || !aiUser.bannerUrl || aiUser.avatarUrl !== exports.AI_AVATAR_URL) {
+        aiUser = await db_1.prisma.user.update({
+            where: { id: aiUser.id },
+            data: {
+                avatarUrl: exports.AI_AVATAR_URL,
+                bannerUrl: exports.AI_BANNER_URL,
+                isVerified: true,
+                verificationType: 'GOLD',
             }
         });
     }
@@ -304,4 +322,256 @@ async function triggerAiCommentReply(postId, commentContent, parentCommentId, au
     catch (err) {
         console.error('Error executing triggerAiCommentReply:', err);
     }
+}
+/**
+ * Handle AI Bot response when user chats directly with ABUAD AI in a direct message channel
+ */
+async function triggerAiDirectChatReply(channelId, userMessage, mediaUrl, userName) {
+    try {
+        const aiUser = await getOrCreateAiUser();
+        // Fetch recent chat history in this channel for natural contextual conversation (last 6 messages)
+        const recentMessages = await db_1.prisma.chatMessage.findMany({
+            where: { channelId, isDeleted: false },
+            orderBy: { createdAt: 'desc' },
+            take: 6,
+            select: { senderId: true, text: true, mediaUrl: true }
+        });
+        const history = recentMessages.reverse().map(m => {
+            const sender = m.senderId === aiUser.id ? 'ABUAD AI' : (userName || 'Student');
+            return `${sender}: ${m.text}`;
+        }).join('\n');
+        const conversationPrompt = `You are ABUAD AI, the intelligent, friendly, and helpful campus AI companion for Afe Babalola University (ABUAD).
+You are having a direct 1-on-1 chat conversation with ${userName || 'a student'}.
+
+CRITICAL INSTRUCTIONS FOR DIRECT CHAT:
+1. Speak in a natural, casual, and friendly conversational tone — just like a smart student or mentor texting back.
+2. Keep your replies SHORT and CONCISE (1 to 3 short sentences or a brief paragraph). Do NOT output long Wikipedia-style definitions, formal essays, or robotic bulleted lists unless explicitly asked.
+3. If they say "hi", "how are you", "what's up", reply warmly and casually.
+4. If an image is provided, comment on it directly.
+
+Recent Chat History:
+${history}
+
+Student's Latest Message: "${userMessage || 'Hello'}"
+
+Reply as ABUAD AI:`;
+        const aiReply = await generateAiReply(conversationPrompt, mediaUrl, userMessage);
+        // Save message from AI bot
+        const createdMsg = await db_1.prisma.chatMessage.create({
+            data: {
+                senderId: aiUser.id,
+                channelId,
+                text: aiReply,
+                type: 'text',
+            },
+            include: {
+                sender: { select: { id: true, username: true, fullName: true, avatarUrl: true } }
+            }
+        });
+        await db_1.prisma.chatChannel.update({
+            where: { id: channelId },
+            data: {
+                lastMessage: aiReply,
+                lastMessageTime: new Date(),
+            }
+        });
+        // Mark prior messages in this channel as read by ABUAD AI
+        const priorUnread = await db_1.prisma.chatMessage.findMany({
+            where: { channelId, senderId: { not: aiUser.id } },
+            select: { id: true, readBy: true }
+        });
+        for (const msg of priorUnread) {
+            let rb = [];
+            try {
+                rb = JSON.parse(msg.readBy || '[]');
+            }
+            catch { }
+            if (!rb.includes(aiUser.id)) {
+                rb.push(aiUser.id);
+                await db_1.prisma.chatMessage.update({
+                    where: { id: msg.id },
+                    data: { readBy: JSON.stringify(rb) }
+                });
+            }
+        }
+        return createdMsg;
+    }
+    catch (err) {
+        console.error('Error in triggerAiDirectChatReply:', err);
+    }
+}
+/**
+ * High-quality verified Pexels themes for autonomous campus AI posts
+ */
+const PEXELS_CAMPUS_IMAGE_COLLECTIONS = {
+    general: [
+        'https://images.pexels.com/photos/1438072/pexels-photo-1438072.jpeg?auto=compress&cs=tinysrgb&w=1000',
+        'https://images.pexels.com/photos/159775/library-la-trobe-study-students-159775.jpeg?auto=compress&cs=tinysrgb&w=1000',
+        'https://images.pexels.com/photos/207692/pexels-photo-207692.jpeg?auto=compress&cs=tinysrgb&w=1000',
+        'https://images.pexels.com/photos/267885/pexels-photo-267885.jpeg?auto=compress&cs=tinysrgb&w=1000',
+    ],
+    tech: [
+        'https://images.pexels.com/photos/3184465/pexels-photo-3184465.jpeg?auto=compress&cs=tinysrgb&w=1000',
+        'https://images.pexels.com/photos/1181675/pexels-photo-1181675.jpeg?auto=compress&cs=tinysrgb&w=1000',
+        'https://images.pexels.com/photos/3861969/pexels-photo-3861969.jpeg?auto=compress&cs=tinysrgb&w=1000',
+        'https://images.pexels.com/photos/546819/pexels-photo-546819.jpeg?auto=compress&cs=tinysrgb&w=1000',
+    ],
+    marketplace: [
+        'https://images.pexels.com/photos/5632402/pexels-photo-5632402.jpeg?auto=compress&cs=tinysrgb&w=1000',
+        'https://images.pexels.com/photos/3985062/pexels-photo-3985062.jpeg?auto=compress&cs=tinysrgb&w=1000',
+        'https://images.pexels.com/photos/4068314/pexels-photo-4068314.jpeg?auto=compress&cs=tinysrgb&w=1000',
+    ],
+    wellness: [
+        'https://images.pexels.com/photos/3768916/pexels-photo-3768916.jpeg?auto=compress&cs=tinysrgb&w=1000',
+        'https://images.pexels.com/photos/3076509/pexels-photo-3076509.jpeg?auto=compress&cs=tinysrgb&w=1000',
+        'https://images.pexels.com/photos/3771097/pexels-photo-3771097.jpeg?auto=compress&cs=tinysrgb&w=1000',
+    ],
+    science_med: [
+        'https://images.pexels.com/photos/2280549/pexels-photo-2280549.jpeg?auto=compress&cs=tinysrgb&w=1000',
+        'https://images.pexels.com/photos/3825586/pexels-photo-3825586.jpeg?auto=compress&cs=tinysrgb&w=1000',
+    ],
+};
+/**
+ * Dynamically synthesizes an autonomous campus post using Gemini AI & live media
+ */
+async function generateDynamicAiPostContent() {
+    const geminiApiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+    const topics = [
+        'Study techniques, memory hacks, and exam readiness for university students (Engineering, Law, Medicine, Sciences)',
+        'ABUAD AI feature highlight: reminding students they can tag @ai in any post or comment or DM @ai for study help',
+        'Promoting the ABUAD student marketplace for buying and selling textbooks, electronics, gadgets, and room essentials',
+        'Latest trends in AI, tech innovation, software development, and modern science relevant to university students',
+        'Campus wellness, managing academic stress, mental clarity, and time management strategies',
+        'Engaging campus poll or discussion starter asking students about their favorite campus study spots or habits',
+    ];
+    const selectedTopic = topics[Math.floor(Math.random() * topics.length)];
+    if (geminiApiKey) {
+        try {
+            const ai = new genai_1.GoogleGenAI({ apiKey: geminiApiKey });
+            const prompt = `You are ABUAD AI, the official student assistant for Afe Babalola University (ABUAD).
+Generate an engaging, original, and beautifully formatted campus post about this topic: "${selectedTopic}".
+
+Requirements:
+1. Include a catchy headline with emojis (e.g. 💡 **ABUAD Study Insights**, 🚀 **Tech Spotlight**, 🛍️ **Marketplace Digest**).
+2. Write 1 to 2 engaging, concise paragraphs with clean markdown.
+3. Mention tagging @ai if relevant to the topic.
+4. Add 3 to 4 hashtags at the end (including #ABUAD).
+5. Output ONLY a valid JSON object matching this structure:
+{
+  "content": "Full markdown text of the post with headline, body, and hashtags",
+  "channelId": "general | marketplace | events | tech | academic",
+  "theme": "general | tech | marketplace | wellness | science_med",
+  "useGeneratedArt": false,
+  "artPrompt": "Short descriptive visual prompt if useGeneratedArt is true"
+}`;
+            const res = await ai.models.generateContent({
+                model: 'gemini-2.0-flash',
+                contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            });
+            const text = res?.text?.trim() || '';
+            const jsonMatch = text.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                const parsed = JSON.parse(jsonMatch[0]);
+                const theme = parsed.theme || 'general';
+                const channelId = parsed.channelId || 'general';
+                let mediaUrl = '';
+                if (parsed.useGeneratedArt && parsed.artPrompt) {
+                    mediaUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(parsed.artPrompt)}?width=1080&height=1080&nologo=true`;
+                }
+                else {
+                    const pool = PEXELS_CAMPUS_IMAGE_COLLECTIONS[theme] || PEXELS_CAMPUS_IMAGE_COLLECTIONS.general;
+                    mediaUrl = pool[Math.floor(Math.random() * pool.length)];
+                }
+                const tagsMatch = parsed.content.match(/#(\w+)/g) || ['#ABUAD', '#ABUADAI', '#CampusLife'];
+                const cleanTags = tagsMatch.map((t) => t.replace('#', ''));
+                return {
+                    content: parsed.content,
+                    channelId,
+                    mediaUrl,
+                    hashtags: JSON.stringify(cleanTags),
+                };
+            }
+        }
+        catch (err) {
+            console.warn('Dynamic Gemini AI post generation failed, using dynamic fallback:', err);
+        }
+    }
+    // Dynamic fallback generator
+    const fallbackThemes = ['tech', 'marketplace', 'wellness', 'general'];
+    const theme = fallbackThemes[Math.floor(Math.random() * fallbackThemes.length)];
+    const pool = PEXELS_CAMPUS_IMAGE_COLLECTIONS[theme] || PEXELS_CAMPUS_IMAGE_COLLECTIONS.general;
+    const mediaUrl = pool[Math.floor(Math.random() * pool.length)];
+    let content = `💡 **ABUAD AI Daily Campus Byte**\n\nNeed quick summaries, code debugging, or study tips? You can tag @ai on any post or comment or chat with me directly in DMs!\n\nKeep striving for excellence, ABUADites! 🚀📚 #ABUAD #CampusTech #StudyTips #ABUADAI`;
+    let channelId = 'general';
+    let hashtags = JSON.stringify(['ABUAD', 'CampusTech', 'StudyTips', 'ABUADAI']);
+    if (theme === 'marketplace') {
+        content = `🛍️ **ABUAD Student Marketplace Spotlight**\n\nLooking to buy or sell laptops, room refrigerators, textbooks, or student services?\n\nExplore verified listings in the **Marketplace** tab right here on ABUAD Nest! Fast, secure, and campus-wide. 📦✨ #ABUADMarketplace #StudentAd #CampusTrade #ABUAD`;
+        channelId = 'marketplace';
+        hashtags = JSON.stringify(['ABUADMarketplace', 'StudentAd', 'CampusTrade', 'ABUAD']);
+    }
+    else if (theme === 'wellness') {
+        content = `🌿 **Student Wellness & Productivity Reminder**\n\nRemember to take short movement breaks between long study sessions. Hydration and rest are just as essential to academic excellence as revision! 💪🧘‍♂️ #ABUADWellness #StudentCare #CampusLife`;
+        channelId = 'general';
+        hashtags = JSON.stringify(['ABUADWellness', 'StudentCare', 'CampusLife']);
+    }
+    return { content, channelId, mediaUrl, hashtags };
+}
+async function generateAndPublishAiPost(force = false) {
+    try {
+        const aiUser = await getOrCreateAiUser();
+        // Check if AI posted in the last 12 hours (unless forced)
+        if (!force) {
+            const recentAiPost = await db_1.prisma.post.findFirst({
+                where: { authorId: aiUser.id },
+                orderBy: { createdAt: 'desc' },
+            });
+            if (recentAiPost) {
+                const hoursSinceLastPost = (Date.now() - new Date(recentAiPost.createdAt).getTime()) / (1000 * 60 * 60);
+                if (hoursSinceLastPost < 12) {
+                    return null; // Not time yet
+                }
+            }
+        }
+        // Generate dynamic post content & media autonomously
+        const dynamicPost = await generateDynamicAiPostContent();
+        const post = await db_1.prisma.post.create({
+            data: {
+                authorId: aiUser.id,
+                content: dynamicPost.content,
+                channelId: dynamicPost.channelId,
+                mediaUrl: dynamicPost.mediaUrl,
+                mediaType: dynamicPost.mediaUrl ? 'image' : 'none',
+                hashtags: dynamicPost.hashtags,
+                status: 'active',
+            },
+            include: {
+                author: {
+                    select: {
+                        id: true,
+                        username: true,
+                        fullName: true,
+                        avatarUrl: true,
+                        isVerified: true,
+                        verificationType: true,
+                    }
+                }
+            }
+        });
+        console.log(`🤖 ABUAD AI published a new autonomous dynamic post: (ID: ${post.id})`);
+        return post;
+    }
+    catch (error) {
+        console.error('Error publishing autonomous AI post:', error);
+        return null;
+    }
+}
+function scheduleAiAutonomousPosting() {
+    // Check and potentially publish shortly after server start (after 3s)
+    setTimeout(() => {
+        generateAndPublishAiPost().catch(e => console.error('Initial AI post check failed:', e));
+    }, 3000);
+    // Check every 4 hours
+    setInterval(() => {
+        generateAndPublishAiPost().catch(e => console.error('Periodic AI post check failed:', e));
+    }, 4 * 60 * 60 * 1000);
 }

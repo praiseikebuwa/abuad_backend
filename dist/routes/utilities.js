@@ -62,12 +62,59 @@ router.patch('/sos/:id/resolve', auth_1.authenticateToken, async (req, res) => {
  */
 router.get('/notifications', auth_1.authenticateToken, async (req, res) => {
     try {
+        const currentUserId = req.user.id;
+        // Purge any historical self-notifications where the user performed the action on their own content
+        await db_1.prisma.notification.deleteMany({
+            where: {
+                userId: currentUserId,
+                senderId: currentUserId,
+            },
+        }).catch(() => { });
         const notifications = await db_1.prisma.notification.findMany({
-            where: { userId: req.user.id },
+            where: {
+                userId: currentUserId,
+                NOT: {
+                    senderId: currentUserId,
+                },
+            },
             orderBy: { createdAt: 'desc' },
-            take: 50,
+            take: 100,
         });
-        return res.json({ success: true, data: notifications });
+        const senderIds = Array.from(new Set(notifications.map(n => n.senderId).filter(Boolean)));
+        const senders = senderIds.length > 0
+            ? await db_1.prisma.user.findMany({
+                where: { id: { in: senderIds } },
+                select: { id: true, username: true, fullName: true, avatarUrl: true, isVerified: true, verificationType: true }
+            })
+            : [];
+        const senderMap = new Map(senders.map(s => [s.id, s]));
+        const enriched = notifications.map(n => {
+            const sender = n.senderId ? senderMap.get(n.senderId) : null;
+            return {
+                id: n.id,
+                userId: n.userId,
+                recipient_id: n.userId,
+                senderId: n.senderId,
+                sender_id: n.senderId,
+                senderName: sender?.fullName || sender?.username || 'User',
+                sender_name: sender?.fullName || sender?.username || 'User',
+                senderAvatarUrl: sender?.avatarUrl || null,
+                sender_avatar_url: sender?.avatarUrl || null,
+                senderHandle: sender?.username || '',
+                senderIsVerified: sender?.isVerified || false,
+                senderVerificationType: sender?.verificationType || 'NONE',
+                title: n.title,
+                body: n.body,
+                type: n.type,
+                relatedId: n.relatedId || null,
+                related_id: n.relatedId || null,
+                isRead: n.isRead,
+                is_read: n.isRead,
+                createdAt: n.createdAt,
+                timestamp: n.createdAt,
+            };
+        });
+        return res.json({ success: true, data: enriched });
     }
     catch (error) {
         return res.status(500).json({ error: 'Failed to fetch notifications' });
@@ -78,14 +125,21 @@ router.get('/notifications', auth_1.authenticateToken, async (req, res) => {
  */
 router.post('/notifications', auth_1.authenticateToken, async (req, res) => {
     try {
-        const { userId, title, body, type } = req.body;
+        const { userId, recipientId, title, body, type, relatedId } = req.body;
+        const targetUserId = recipientId || userId;
+        const senderId = req.user.id;
+        // Never allow a user to receive notifications for their own actions
+        if (!targetUserId || targetUserId === senderId) {
+            return res.status(200).json({ success: true, message: 'Self-notification skipped' });
+        }
         const notification = await db_1.prisma.notification.create({
             data: {
-                userId: userId || req.user.id,
-                senderId: req.user.id,
+                userId: targetUserId,
+                senderId,
                 title: title || 'Notification',
                 body: body || '',
                 type: type || 'system',
+                relatedId: relatedId || null,
             },
         });
         return res.status(201).json({ success: true, data: notification });
@@ -95,11 +149,58 @@ router.post('/notifications', auth_1.authenticateToken, async (req, res) => {
     }
 });
 /**
+ * DELETE /api/utilities/notifications/:id - Delete single notification
+ */
+router.delete('/notifications/:id', auth_1.authenticateToken, async (req, res) => {
+    try {
+        await db_1.prisma.notification.deleteMany({
+            where: {
+                id: String(req.params.id),
+                userId: req.user.id,
+            },
+        });
+        return res.json({ success: true, message: 'Notification deleted' });
+    }
+    catch (error) {
+        return res.status(500).json({ error: 'Failed to delete notification' });
+    }
+});
+/**
+ * DELETE /api/utilities/notifications - Delete multiple notifications or clear all
+ */
+router.delete('/notifications', auth_1.authenticateToken, async (req, res) => {
+    try {
+        const { ids } = req.body || {};
+        if (Array.isArray(ids) && ids.length > 0) {
+            await db_1.prisma.notification.deleteMany({
+                where: {
+                    id: { in: ids.map((id) => String(id)) },
+                    userId: req.user.id,
+                },
+            });
+        }
+        else {
+            await db_1.prisma.notification.deleteMany({
+                where: {
+                    userId: req.user.id,
+                },
+            });
+        }
+        return res.json({ success: true, message: 'Notifications deleted' });
+    }
+    catch (error) {
+        return res.status(500).json({ error: 'Failed to delete notifications' });
+    }
+});
+/**
  * PATCH /api/utilities/notifications/:id/read - Mark notification as read
  */
 router.patch('/notifications/:id/read', auth_1.authenticateToken, async (req, res) => {
     try {
-        await db_1.prisma.notification.update({ where: { id: String(req.params.id) }, data: { isRead: true } });
+        await db_1.prisma.notification.updateMany({
+            where: { id: String(req.params.id), userId: req.user.id },
+            data: { isRead: true }
+        });
         return res.json({ success: true });
     }
     catch (error) {
@@ -111,7 +212,10 @@ router.patch('/notifications/:id/read', auth_1.authenticateToken, async (req, re
  */
 router.patch('/notifications/read-all', auth_1.authenticateToken, async (req, res) => {
     try {
-        await db_1.prisma.notification.updateMany({ where: { userId: req.user.id, isRead: false }, data: { isRead: true } });
+        await db_1.prisma.notification.updateMany({
+            where: { userId: req.user.id, isRead: false },
+            data: { isRead: true }
+        });
         return res.json({ success: true });
     }
     catch (error) {

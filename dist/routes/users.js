@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const auth_1 = require("../middleware/auth");
 const db_1 = require("../config/db");
+const aiBotService_1 = require("../services/aiBotService");
 const router = (0, express_1.Router)();
 /**
  * GET /api/users - List all users (Admin/Authenticated)
@@ -54,6 +55,128 @@ router.get('/', auth_1.authenticateToken, async (req, res) => {
         return res.status(500).json({ error: 'Failed to fetch users' });
     }
 });
+const handlePeopleYouMayKnow = async (req, res) => {
+    try {
+        const currentUserId = req.user.id;
+        const me = await db_1.prisma.user.findUnique({
+            where: { id: currentUserId },
+            select: { id: true, department: true, college: true, level: true, phoneNumber: true },
+        });
+        const myFollowings = await db_1.prisma.follower.findMany({
+            where: { followerId: currentUserId },
+            select: { followedId: true },
+        });
+        const excludedIds = new Set(myFollowings.map(f => f.followedId));
+        excludedIds.add(currentUserId);
+        excludedIds.add('abuad_ai');
+        const blocked = await db_1.prisma.blockedUser.findMany({
+            where: {
+                OR: [{ blockerId: currentUserId }, { blockedId: currentUserId }],
+            },
+            select: { blockerId: true, blockedId: true },
+        });
+        blocked.forEach(b => {
+            excludedIds.add(b.blockerId);
+            excludedIds.add(b.blockedId);
+        });
+        const candidates = await db_1.prisma.user.findMany({
+            where: {
+                id: { notIn: Array.from(excludedIds) },
+                isBlocked: false,
+            },
+            take: 50,
+            select: {
+                id: true,
+                username: true,
+                fullName: true,
+                bio: true,
+                avatarUrl: true,
+                bannerUrl: true,
+                department: true,
+                level: true,
+                college: true,
+                isVerified: true,
+                verificationType: true,
+                followersCount: true,
+                followingCount: true,
+                createdAt: true,
+                followers: {
+                    select: { followerId: true },
+                },
+            },
+        });
+        const myFollowingList = myFollowings.map(f => f.followedId);
+        const scoredUsers = candidates.map(user => {
+            let score = 0;
+            let reason = 'Suggested for you';
+            // Mutual connections
+            const mutuals = user.followers.filter(f => myFollowingList.includes(f.followerId));
+            const mutualCount = mutuals.length;
+            if (mutualCount > 0) {
+                score += mutualCount * 30;
+                reason = mutualCount === 1 ? '1 mutual connection' : `${mutualCount} mutual connections`;
+            }
+            else if (me?.department && user.department && user.department.toLowerCase() === me.department.toLowerCase()) {
+                score += 25;
+                reason = `Same department • ${user.department}`;
+            }
+            else if (me?.college && user.college && user.college.toLowerCase() === me.college.toLowerCase()) {
+                score += 15;
+                reason = `From ${user.college}`;
+            }
+            else if (me?.level && user.level && user.level === me.level) {
+                score += 10;
+                reason = `${user.level} Level peer`;
+            }
+            else if (user.followersCount > 10) {
+                score += Math.min(user.followersCount, 20);
+                reason = 'Popular in ABUAD';
+            }
+            else if (user.isVerified) {
+                score += 8;
+                reason = 'Verified campus profile';
+            }
+            return {
+                id: user.id,
+                uid: user.id,
+                username: user.username,
+                handle: user.username,
+                fullName: user.fullName,
+                displayName: user.fullName,
+                bio: user.bio,
+                avatarUrl: user.avatarUrl,
+                bannerUrl: user.bannerUrl,
+                department: user.department,
+                level: user.level,
+                college: user.college,
+                isVerified: user.isVerified,
+                verificationType: user.verificationType,
+                followersCount: user.followersCount,
+                followingCount: user.followingCount,
+                mutualCount,
+                reason,
+                score,
+            };
+        });
+        scoredUsers.sort((a, b) => b.score - a.score);
+        return res.json({
+            success: true,
+            data: scoredUsers.slice(0, 20),
+        });
+    }
+    catch (error) {
+        console.error('Error fetching people you may know:', error);
+        return res.status(500).json({ error: 'Failed to fetch suggestions' });
+    }
+};
+/**
+ * GET /api/users/people-you-may-know - Smart recommendation algorithm
+ */
+router.get('/people-you-may-know', auth_1.authenticateToken, handlePeopleYouMayKnow);
+/**
+ * GET /api/users/suggestions - Alias
+ */
+router.get('/suggestions', auth_1.authenticateToken, handlePeopleYouMayKnow);
 /**
  * GET /api/users/me - Current authenticated user's profile
  */
@@ -162,31 +285,56 @@ router.put('/me', auth_1.authenticateToken, async (req, res) => {
 /**
  * GET /api/users/search?q=
  */
-router.get('/search', auth_1.authenticateToken, async (req, res) => {
+router.get('/search', auth_1.optionalAuth, async (req, res) => {
     try {
-        const query = String(req.query.q || '');
+        const rawQuery = String(req.query.q || '').trim();
+        const cleanQuery = rawQuery.replace(/^@/, '');
+        const whereClause = {
+            isBlocked: false,
+        };
+        if (cleanQuery) {
+            whereClause.OR = [
+                { username: { contains: cleanQuery } },
+                { fullName: { contains: cleanQuery } },
+                { email: { contains: cleanQuery } },
+                { department: { contains: cleanQuery } },
+                { bio: { contains: cleanQuery } },
+            ];
+        }
         const users = await db_1.prisma.user.findMany({
-            where: {
-                OR: [
-                    { username: { contains: query } },
-                    { fullName: { contains: query } },
-                    { email: { contains: query } },
-                ],
-            },
-            take: 20,
+            where: whereClause,
+            take: 40,
+            orderBy: cleanQuery
+                ? [{ followersCount: 'desc' }, { createdAt: 'desc' }]
+                : [{ followersCount: 'desc' }, { createdAt: 'desc' }],
             select: {
                 id: true,
                 username: true,
                 fullName: true,
+                email: true,
                 avatarUrl: true,
+                bannerUrl: true,
+                bio: true,
                 department: true,
                 level: true,
+                college: true,
                 isVerified: true,
+                verificationType: true,
+                followersCount: true,
+                followingCount: true,
+                status: true,
             },
         });
-        return res.json({ success: true, data: users });
+        const mapped = users.map(u => ({
+            ...u,
+            uid: u.id,
+            displayName: u.fullName,
+            handle: u.username,
+        }));
+        return res.json({ success: true, data: mapped });
     }
     catch (error) {
+        console.error('Error searching users:', error);
         return res.status(500).json({ error: 'Failed to search users' });
     }
 });
@@ -195,7 +343,11 @@ router.get('/search', auth_1.authenticateToken, async (req, res) => {
  */
 router.get('/:id/followers', auth_1.authenticateToken, async (req, res) => {
     try {
-        const targetId = req.params.id === 'me' ? req.user.id : String(req.params.id);
+        let targetId = req.params.id === 'me' ? req.user.id : String(req.params.id);
+        if (targetId === 'abuad_ai' || targetId.toLowerCase() === 'ai' || targetId === 'ai_bot') {
+            const ai = await (0, aiBotService_1.getOrCreateAiUser)();
+            targetId = ai.id;
+        }
         const followers = await db_1.prisma.follower.findMany({
             where: { followedId: targetId },
             include: {
@@ -216,7 +368,11 @@ router.get('/:id/followers', auth_1.authenticateToken, async (req, res) => {
  */
 router.get('/:id/following', auth_1.authenticateToken, async (req, res) => {
     try {
-        const targetId = req.params.id === 'me' ? req.user.id : String(req.params.id);
+        let targetId = req.params.id === 'me' ? req.user.id : String(req.params.id);
+        if (targetId === 'abuad_ai' || targetId.toLowerCase() === 'ai' || targetId === 'ai_bot') {
+            const ai = await (0, aiBotService_1.getOrCreateAiUser)();
+            targetId = ai.id;
+        }
         const following = await db_1.prisma.follower.findMany({
             where: { followerId: targetId },
             include: {
@@ -238,24 +394,33 @@ router.get('/:id/following', auth_1.authenticateToken, async (req, res) => {
 router.post('/:id/follow', auth_1.authenticateToken, async (req, res) => {
     try {
         const followerId = req.user.id;
-        const followedId = String(req.params.id);
+        let followedId = String(req.params.id);
+        if (followedId === 'abuad_ai' || followedId.toLowerCase() === 'ai' || followedId === 'ai_bot') {
+            const ai = await (0, aiBotService_1.getOrCreateAiUser)();
+            followedId = ai.id;
+        }
         if (followerId === followedId) {
             return res.status(400).json({ error: 'Cannot follow yourself' });
+        }
+        const targetUser = await db_1.prisma.user.findUnique({ where: { id: followedId } });
+        if (!targetUser) {
+            return res.status(404).json({ error: 'User not found' });
         }
         const existing = await db_1.prisma.follower.findUnique({
             where: { followerId_followedId: { followerId, followedId } },
         });
         if (existing) {
-            return res.status(409).json({ error: 'Already following this user' });
+            return res.status(200).json({ success: true, isFollowing: true, message: 'Already following' });
         }
         await db_1.prisma.$transaction([
             db_1.prisma.follower.create({ data: { followerId, followedId } }),
             db_1.prisma.user.update({ where: { id: followerId }, data: { followingCount: { increment: 1 } } }),
             db_1.prisma.user.update({ where: { id: followedId }, data: { followersCount: { increment: 1 } } }),
         ]);
-        return res.status(201).json({ success: true, isFollowing: true });
+        return res.status(200).json({ success: true, isFollowing: true });
     }
     catch (error) {
+        console.error('Follow error:', error);
         return res.status(500).json({ error: 'Failed to follow user' });
     }
 });
@@ -265,12 +430,16 @@ router.post('/:id/follow', auth_1.authenticateToken, async (req, res) => {
 router.delete('/:id/follow', auth_1.authenticateToken, async (req, res) => {
     try {
         const followerId = req.user.id;
-        const followedId = String(req.params.id);
+        let followedId = String(req.params.id);
+        if (followedId === 'abuad_ai' || followedId.toLowerCase() === 'ai' || followedId === 'ai_bot') {
+            const ai = await (0, aiBotService_1.getOrCreateAiUser)();
+            followedId = ai.id;
+        }
         const existing = await db_1.prisma.follower.findUnique({
             where: { followerId_followedId: { followerId, followedId } },
         });
         if (!existing) {
-            return res.status(404).json({ error: 'Not following this user' });
+            return res.status(200).json({ success: true, isFollowing: false, message: 'Not currently following' });
         }
         await db_1.prisma.$transaction([
             db_1.prisma.follower.delete({ where: { id: existing.id } }),
@@ -280,6 +449,7 @@ router.delete('/:id/follow', auth_1.authenticateToken, async (req, res) => {
         return res.json({ success: true, isFollowing: false });
     }
     catch (error) {
+        console.error('Unfollow error:', error);
         return res.status(500).json({ error: 'Failed to unfollow user' });
     }
 });
@@ -288,8 +458,13 @@ router.delete('/:id/follow', auth_1.authenticateToken, async (req, res) => {
  */
 router.get('/:id/is-following', auth_1.authenticateToken, async (req, res) => {
     try {
+        let targetId = String(req.params.id);
+        if (targetId === 'abuad_ai' || targetId.toLowerCase() === 'ai' || targetId === 'ai_bot') {
+            const ai = await (0, aiBotService_1.getOrCreateAiUser)();
+            targetId = ai.id;
+        }
         const existing = await db_1.prisma.follower.findUnique({
-            where: { followerId_followedId: { followerId: req.user.id, followedId: String(req.params.id) } },
+            where: { followerId_followedId: { followerId: req.user.id, followedId: targetId } },
         });
         return res.json({ success: true, isFollowing: !!existing });
     }
@@ -350,38 +525,172 @@ router.delete('/block/:id', auth_1.authenticateToken, async (req, res) => {
     }
 });
 /**
- * ALL /api/users/:id - Get or update user attributes (verification, status, etc.)
+ * GET /api/users/profile/:id - Profile endpoint alias
  */
-router.all('/:id', auth_1.authenticateToken, async (req, res) => {
+router.get('/profile/:id', auth_1.optionalAuth, async (req, res) => {
     const targetId = String(req.params.id);
-    if (req.method === 'GET') {
-        try {
-            const user = await db_1.prisma.user.findUnique({
-                where: { id: targetId },
-                select: {
-                    id: true,
-                    username: true,
-                    fullName: true,
-                    bio: true,
-                    avatarUrl: true,
-                    bannerUrl: true,
-                    department: true,
-                    level: true,
-                    college: true,
-                    role: true,
-                    isVerified: true,
-                    verificationType: true,
-                    followersCount: true,
-                    followingCount: true,
-                    status: true,
-                    lastSeen: true,
-                    websiteUrl: true,
-                    createdAt: true,
+    const currentUserId = req.user?.id;
+    try {
+        if (targetId === 'abuad_ai' || targetId.toLowerCase() === 'ai' || targetId === 'ai_bot') {
+            const aiUser = await (0, aiBotService_1.getOrCreateAiUser)();
+            const realFollowersCount = await db_1.prisma.follower.count({ where: { followedId: aiUser.id } });
+            const realFollowingCount = await db_1.prisma.follower.count({ where: { followerId: aiUser.id } });
+            const isFollowing = currentUserId
+                ? await db_1.prisma.follower.findUnique({
+                    where: {
+                        followerId_followedId: {
+                            followerId: currentUserId,
+                            followedId: aiUser.id,
+                        },
+                    },
+                })
+                : null;
+            return res.json({
+                success: true,
+                data: {
+                    ...aiUser,
+                    displayName: aiUser.fullName,
+                    handle: aiUser.username,
+                    department: aiUser.department || 'Artificial Intelligence',
+                    college: aiUser.college || 'Computing & Engineering',
+                    followersCount: Math.max(aiUser.followersCount, realFollowersCount),
+                    followingCount: realFollowingCount,
+                    isFollowing: !!isFollowing,
+                    status: 'online',
                 },
             });
-            if (!user)
+        }
+        let user = await db_1.prisma.user.findUnique({
+            where: { id: targetId },
+            include: {
+                _count: {
+                    select: { followers: true, following: true, posts: true },
+                },
+            },
+        });
+        if (!user) {
+            user = await db_1.prisma.user.findUnique({
+                where: { username: targetId },
+                include: {
+                    _count: {
+                        select: { followers: true, following: true, posts: true },
+                    },
+                },
+            });
+        }
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        let isFollowing = false;
+        if (currentUserId && currentUserId !== user.id) {
+            const followRecord = await db_1.prisma.follower.findUnique({
+                where: {
+                    followerId_followedId: {
+                        followerId: currentUserId,
+                        followedId: user.id,
+                    },
+                },
+            });
+            isFollowing = !!followRecord;
+        }
+        return res.json({
+            success: true,
+            data: {
+                ...user,
+                displayName: user.fullName,
+                handle: user.username,
+                followersCount: user._count?.followers ?? user.followersCount ?? 0,
+                followingCount: user._count?.following ?? user.followingCount ?? 0,
+                isFollowing,
+            },
+        });
+    }
+    catch (error) {
+        console.error('Error fetching user profile:', error);
+        return res.status(500).json({ error: 'Failed to fetch user profile' });
+    }
+});
+/**
+ * ALL /api/users/:id - Get or update user attributes (verification, status, etc.)
+ */
+router.all('/:id', auth_1.optionalAuth, async (req, res) => {
+    const targetId = String(req.params.id);
+    const currentUserId = req.user?.id;
+    if (req.method === 'GET') {
+        try {
+            if (targetId === 'abuad_ai' || targetId.toLowerCase() === 'ai' || targetId === 'ai_bot') {
+                const aiUser = await (0, aiBotService_1.getOrCreateAiUser)();
+                const realFollowersCount = await db_1.prisma.follower.count({ where: { followedId: aiUser.id } });
+                const realFollowingCount = await db_1.prisma.follower.count({ where: { followerId: aiUser.id } });
+                const isFollowing = currentUserId
+                    ? await db_1.prisma.follower.findUnique({
+                        where: {
+                            followerId_followedId: {
+                                followerId: currentUserId,
+                                followedId: aiUser.id,
+                            },
+                        },
+                    })
+                    : null;
+                return res.json({
+                    success: true,
+                    data: {
+                        ...aiUser,
+                        displayName: aiUser.fullName,
+                        handle: aiUser.username,
+                        department: aiUser.department || 'Artificial Intelligence',
+                        college: aiUser.college || 'Computing & Engineering',
+                        followersCount: Math.max(aiUser.followersCount, realFollowersCount),
+                        followingCount: realFollowingCount,
+                        isFollowing: !!isFollowing,
+                        status: 'online',
+                    },
+                });
+            }
+            let user = await db_1.prisma.user.findUnique({
+                where: { id: targetId },
+                include: {
+                    _count: {
+                        select: { followers: true, following: true, posts: true },
+                    },
+                },
+            });
+            if (!user) {
+                user = await db_1.prisma.user.findUnique({
+                    where: { username: targetId },
+                    include: {
+                        _count: {
+                            select: { followers: true, following: true, posts: true },
+                        },
+                    },
+                });
+            }
+            if (!user) {
                 return res.status(404).json({ error: 'User not found' });
-            return res.json({ success: true, data: user });
+            }
+            let isFollowing = false;
+            if (currentUserId && currentUserId !== user.id) {
+                const followRecord = await db_1.prisma.follower.findUnique({
+                    where: {
+                        followerId_followedId: {
+                            followerId: currentUserId,
+                            followedId: user.id,
+                        },
+                    },
+                });
+                isFollowing = !!followRecord;
+            }
+            return res.json({
+                success: true,
+                data: {
+                    ...user,
+                    displayName: user.fullName,
+                    handle: user.username,
+                    followersCount: user._count?.followers ?? user.followersCount ?? 0,
+                    followingCount: user._count?.following ?? user.followingCount ?? 0,
+                    isFollowing,
+                },
+            });
         }
         catch (error) {
             return res.status(500).json({ error: 'Failed to fetch user' });
@@ -481,16 +790,49 @@ router.all('/profile', auth_1.authenticateToken, async (req, res) => {
         return res.status(500).json({ error: 'Failed to update user profile' });
     }
 });
+const AI_USER_PROFILE = {
+    id: 'abuad_ai',
+    fullName: 'ABUAD AI Companion',
+    username: 'abuad_ai',
+    email: 'ai@abuad.edu.ng',
+    bio: 'Official ABUAD AI Assistant powered by Llama 3.1. Ask me anything about campus, courses, or events!',
+    avatarUrl: 'https://pub-0014553a7b194df8b2d31efb7c6f4921.r2.dev/abuad_ai_avatar.png',
+    bannerUrl: null,
+    department: 'AI & Data Science',
+    college: 'Sciences & Computing',
+    phoneNumber: null,
+    role: 'ADMIN',
+    isVerified: true,
+    verificationType: 'GOLD',
+    followersCount: 1500,
+    followingCount: 1,
+    status: 'online',
+    streakCount: 99,
+    createdAt: new Date().toISOString(),
+};
 /**
  * GET /api/users/profile/:id - Profile by ID alias
  */
 router.get('/profile/:id', auth_1.authenticateToken, async (req, res) => {
     try {
-        const user = await db_1.prisma.user.findUnique({
-            where: { id: String(req.params.id) },
+        const id = String(req.params.id);
+        if (id === 'abuad_ai' || id.toLowerCase() === 'ai' || id === 'ai_bot') {
+            return res.json({ success: true, data: AI_USER_PROFILE });
+        }
+        let user = await db_1.prisma.user.findUnique({
+            where: { id },
         });
-        if (!user)
+        if (!user) {
+            user = await db_1.prisma.user.findUnique({
+                where: { username: id },
+            });
+        }
+        if (!user) {
+            if (id.toLowerCase() === 'abuad_ai' || id.toLowerCase() === 'ai') {
+                return res.json({ success: true, data: AI_USER_PROFILE });
+            }
             return res.status(404).json({ error: 'User not found' });
+        }
         return res.json({ success: true, data: user });
     }
     catch (error) {
