@@ -1,0 +1,266 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const auth_1 = require("../middleware/auth");
+const db_1 = require("../config/db");
+const router = (0, express_1.Router)();
+/**
+ * GET /api/utilities/sos or /api/sos_alerts - Get SOS alerts
+ */
+router.get(['/', '/sos', '/sos_alerts'], auth_1.authenticateToken, async (req, res) => {
+    try {
+        const alerts = await db_1.prisma.sOSAlert.findMany({
+            orderBy: { createdAt: 'desc' },
+            take: 100,
+            include: {
+                user: { select: { id: true, username: true, fullName: true, avatarUrl: true } },
+            },
+        });
+        return res.json({ success: true, data: alerts });
+    }
+    catch (error) {
+        return res.status(500).json({ error: 'Failed to fetch SOS alerts' });
+    }
+});
+/**
+ * POST /api/utilities/sos - Broadcast SOS Alert
+ */
+router.post('/sos', auth_1.authenticateToken, async (req, res) => {
+    try {
+        const { latitude, longitude, message } = req.body;
+        if (latitude === undefined || longitude === undefined) {
+            return res.status(400).json({ error: 'Latitude and longitude are required' });
+        }
+        const alert = await db_1.prisma.sOSAlert.create({
+            data: {
+                userId: req.user.id,
+                latitude: Number(latitude),
+                longitude: Number(longitude),
+                message: message || 'EMERGENCY SOS ALERT',
+            },
+        });
+        return res.status(201).json({ success: true, data: alert });
+    }
+    catch (error) {
+        return res.status(500).json({ error: 'Failed to dispatch SOS alert' });
+    }
+});
+/**
+ * PATCH /api/utilities/sos/:id/resolve - Resolve an SOS alert
+ */
+router.patch('/sos/:id/resolve', auth_1.authenticateToken, async (req, res) => {
+    try {
+        await db_1.prisma.sOSAlert.update({ where: { id: String(req.params.id) }, data: { status: 'RESOLVED' } });
+        return res.json({ success: true });
+    }
+    catch (error) {
+        return res.status(500).json({ error: 'Failed to resolve SOS alert' });
+    }
+});
+/**
+ * GET /api/utilities/notifications - User notifications
+ */
+router.get('/notifications', auth_1.authenticateToken, async (req, res) => {
+    try {
+        const notifications = await db_1.prisma.notification.findMany({
+            where: { userId: req.user.id },
+            orderBy: { createdAt: 'desc' },
+            take: 50,
+        });
+        return res.json({ success: true, data: notifications });
+    }
+    catch (error) {
+        return res.status(500).json({ error: 'Failed to fetch notifications' });
+    }
+});
+/**
+ * POST /api/utilities/notifications - Create a notification
+ */
+router.post('/notifications', auth_1.authenticateToken, async (req, res) => {
+    try {
+        const { userId, title, body, type } = req.body;
+        const notification = await db_1.prisma.notification.create({
+            data: {
+                userId: userId || req.user.id,
+                senderId: req.user.id,
+                title: title || 'Notification',
+                body: body || '',
+                type: type || 'system',
+            },
+        });
+        return res.status(201).json({ success: true, data: notification });
+    }
+    catch (error) {
+        return res.status(500).json({ error: 'Failed to create notification' });
+    }
+});
+/**
+ * PATCH /api/utilities/notifications/:id/read - Mark notification as read
+ */
+router.patch('/notifications/:id/read', auth_1.authenticateToken, async (req, res) => {
+    try {
+        await db_1.prisma.notification.update({ where: { id: String(req.params.id) }, data: { isRead: true } });
+        return res.json({ success: true });
+    }
+    catch (error) {
+        return res.status(500).json({ error: 'Failed to mark notification as read' });
+    }
+});
+/**
+ * PATCH /api/utilities/notifications/read-all - Mark all notifications as read
+ */
+router.patch('/notifications/read-all', auth_1.authenticateToken, async (req, res) => {
+    try {
+        await db_1.prisma.notification.updateMany({ where: { userId: req.user.id, isRead: false }, data: { isRead: true } });
+        return res.json({ success: true });
+    }
+    catch (error) {
+        return res.status(500).json({ error: 'Failed to mark all notifications as read' });
+    }
+});
+/**
+ * GET /api/utilities/presence - Get all online users
+ */
+router.get('/presence', auth_1.authenticateToken, async (req, res) => {
+    try {
+        const presence = await db_1.prisma.presence.findMany({
+            where: { status: 'online' },
+            include: {
+                user: { select: { id: true, username: true, fullName: true, avatarUrl: true } },
+            },
+        });
+        return res.json({ success: true, data: presence });
+    }
+    catch (error) {
+        return res.status(500).json({ error: 'Failed to fetch presence' });
+    }
+});
+/**
+ * PUT /api/utilities/presence - Update own presence status
+ */
+router.put('/presence', auth_1.authenticateToken, async (req, res) => {
+    try {
+        const { status } = req.body;
+        await db_1.prisma.presence.upsert({
+            where: { userId: req.user.id },
+            update: { status: status || 'online', lastSeen: new Date() },
+            create: { userId: req.user.id, status: status || 'online', lastSeen: new Date() },
+        });
+        // Also update the user's status field
+        await db_1.prisma.user.update({
+            where: { id: req.user.id },
+            data: { status: status || 'online', lastSeen: new Date() },
+        });
+        return res.json({ success: true });
+    }
+    catch (error) {
+        return res.status(500).json({ error: 'Failed to update presence' });
+    }
+});
+/**
+ * GET /api/utilities/lost-found - Get lost & found items
+ */
+router.get('/lost-found', auth_1.authenticateToken, async (req, res) => {
+    try {
+        const items = await db_1.prisma.lostAndFoundItem.findMany({
+            orderBy: { createdAt: 'desc' },
+            take: 50,
+            include: {
+                reporter: { select: { id: true, username: true, fullName: true, avatarUrl: true } },
+            },
+        });
+        return res.json({ success: true, data: items });
+    }
+    catch (error) {
+        return res.status(500).json({ error: 'Failed to fetch lost and found items' });
+    }
+});
+/**
+ * POST /api/utilities/lost-found - Report a lost or found item
+ */
+router.post('/lost-found', auth_1.authenticateToken, async (req, res) => {
+    try {
+        const { title, description, location, status, imageUrl } = req.body;
+        if (!title || !location)
+            return res.status(400).json({ error: 'Title and location are required' });
+        const item = await db_1.prisma.lostAndFoundItem.create({
+            data: {
+                reporterId: req.user.id,
+                title,
+                description: description || '',
+                location,
+                status: status || 'LOST',
+                imageUrl: imageUrl || null,
+            },
+        });
+        return res.status(201).json({ success: true, data: item });
+    }
+    catch (error) {
+        return res.status(500).json({ error: 'Failed to report lost/found item' });
+    }
+});
+/**
+ * PATCH /api/utilities/lost-found/:id/claim - Mark item as claimed
+ */
+router.patch('/lost-found/:id/claim', auth_1.authenticateToken, async (req, res) => {
+    try {
+        await db_1.prisma.lostAndFoundItem.update({ where: { id: String(req.params.id) }, data: { status: 'CLAIMED' } });
+        return res.json({ success: true });
+    }
+    catch (error) {
+        return res.status(500).json({ error: 'Failed to mark item as claimed' });
+    }
+});
+/**
+ * GET /api/utilities/shuttle - Shuttle locations
+ */
+router.get('/shuttle', auth_1.authenticateToken, async (req, res) => {
+    try {
+        const shuttles = await db_1.prisma.shuttleLocation.findMany();
+        return res.json({ success: true, data: shuttles });
+    }
+    catch (error) {
+        return res.status(500).json({ error: 'Failed to fetch shuttle locations' });
+    }
+});
+/**
+ * PUT /api/utilities/shuttle/:shuttleId - Update shuttle location (driver only)
+ */
+router.put('/shuttle/:shuttleId', auth_1.authenticateToken, async (req, res) => {
+    try {
+        const { latitude, longitude, driverName } = req.body;
+        await db_1.prisma.shuttleLocation.upsert({
+            where: { shuttleId: String(req.params.shuttleId) },
+            update: { latitude, longitude, driverName },
+            create: { shuttleId: String(req.params.shuttleId), latitude, longitude, driverName },
+        });
+        return res.json({ success: true });
+    }
+    catch (error) {
+        return res.status(500).json({ error: 'Failed to update shuttle location' });
+    }
+});
+/**
+ * POST /api/utilities/report - Report content
+ */
+router.post('/report', auth_1.authenticateToken, async (req, res) => {
+    try {
+        const { targetId, targetType, reason } = req.body;
+        if (!targetId || !targetType || !reason) {
+            return res.status(400).json({ error: 'targetId, targetType, and reason are required' });
+        }
+        const report = await db_1.prisma.report.create({
+            data: {
+                reporterId: req.user.id,
+                targetId,
+                targetType,
+                reason,
+            },
+        });
+        return res.status(201).json({ success: true, data: report });
+    }
+    catch (error) {
+        return res.status(500).json({ error: 'Failed to submit report' });
+    }
+});
+exports.default = router;
