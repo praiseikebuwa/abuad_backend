@@ -1,5 +1,5 @@
 import { Router, Response } from 'express';
-import { authenticateToken, AuthenticatedRequest } from '../middleware/auth';
+import { authenticateToken, optionalAuth, AuthenticatedRequest } from '../middleware/auth';
 import { prisma } from '../config/db';
 
 const router = Router();
@@ -21,11 +21,12 @@ function safeParseImages(imagesRaw: any): string[] {
 /**
  * GET /api/marketplace
  */
-router.get('/', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+router.get('/', optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { category } = req.query;
+    const categoryFilter = (category && category !== 'all' && category !== 'All') ? String(category) : undefined;
     const items = await prisma.marketplaceItem.findMany({
-      where: category ? { category: String(category) } : undefined,
+      where: categoryFilter ? { category: categoryFilter } : undefined,
       orderBy: { createdAt: 'desc' },
       include: {
         seller: {
