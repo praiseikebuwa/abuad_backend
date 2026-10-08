@@ -297,6 +297,104 @@ router.post('/channels/:id/pin', auth_1.authenticateToken, async (req, res) => {
     }
 });
 /**
+ * POST /api/chat/channels/:id/archive - Archive/unarchive a channel
+ */
+router.post('/channels/:id/archive', auth_1.authenticateToken, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const channel = await db_1.prisma.chatChannel.findUnique({ where: { id: String(req.params.id) } });
+        if (!channel)
+            return res.status(404).json({ error: 'Channel not found' });
+        let archivedBy = [];
+        try {
+            archivedBy = JSON.parse(channel.archivedBy);
+        }
+        catch { }
+        const isArchived = archivedBy.includes(userId);
+        const updatedArchivedBy = isArchived ? archivedBy.filter(id => id !== userId) : [...archivedBy, userId];
+        await db_1.prisma.chatChannel.update({
+            where: { id: String(req.params.id) },
+            data: { archivedBy: JSON.stringify(updatedArchivedBy) },
+        });
+        return res.json({ success: true, isArchived: !isArchived });
+    }
+    catch (error) {
+        return res.status(500).json({ error: 'Failed to archive/unarchive channel' });
+    }
+});
+/**
+ * POST /api/chat/channels/:id/read - Mark messages as read by current user
+ */
+router.post('/channels/:id/read', auth_1.authenticateToken, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const channelId = String(req.params.id);
+        const messages = await db_1.prisma.chatMessage.findMany({
+            where: { channelId },
+        });
+        for (const msg of messages) {
+            let readBy = [];
+            try {
+                readBy = JSON.parse(msg.readBy);
+            }
+            catch { }
+            if (!readBy.includes(userId)) {
+                readBy.push(userId);
+                await db_1.prisma.chatMessage.update({
+                    where: { id: msg.id },
+                    data: { readBy: JSON.stringify(readBy) },
+                });
+            }
+        }
+        return res.json({ success: true });
+    }
+    catch (error) {
+        return res.status(500).json({ error: 'Failed to mark channel as read' });
+    }
+});
+/**
+ * DELETE /api/chat/channels/:id - Delete/clear conversation
+ */
+router.delete('/channels/:id', auth_1.authenticateToken, async (req, res) => {
+    try {
+        const channelId = String(req.params.id);
+        const channel = await db_1.prisma.chatChannel.findUnique({ where: { id: channelId } });
+        if (!channel)
+            return res.status(404).json({ error: 'Channel not found' });
+        // Delete associated messages
+        await db_1.prisma.chatMessage.deleteMany({
+            where: { channelId },
+        });
+        // Delete channel
+        await db_1.prisma.chatChannel.delete({
+            where: { id: channelId },
+        });
+        return res.json({ success: true, message: 'Channel deleted successfully' });
+    }
+    catch (error) {
+        return res.status(500).json({ error: 'Failed to delete channel' });
+    }
+});
+/**
+ * DELETE /api/chat/channels/:id/messages - Clear all messages in channel
+ */
+router.delete('/channels/:id/messages', auth_1.authenticateToken, async (req, res) => {
+    try {
+        const channelId = String(req.params.id);
+        await db_1.prisma.chatMessage.deleteMany({
+            where: { channelId },
+        });
+        await db_1.prisma.chatChannel.update({
+            where: { id: channelId },
+            data: { lastMessage: null, lastMessageTime: null },
+        });
+        return res.json({ success: true, message: 'Messages cleared successfully' });
+    }
+    catch (error) {
+        return res.status(500).json({ error: 'Failed to clear messages' });
+    }
+});
+/**
  * GET /api/chat/messages - Get messages for a channel or DM
  */
 router.get('/messages', auth_1.authenticateToken, async (req, res) => {
